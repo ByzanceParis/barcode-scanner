@@ -43,6 +43,7 @@ export enum SupportedFormat {
 
 export interface ScanOptions {
   targetedFormats?: [SupportedFormat];
+  isCode?: boolean;
 }
 
 export interface ScanResult {

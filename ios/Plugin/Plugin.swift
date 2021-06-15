@@ -3,7 +3,7 @@ import Foundation
 import AVFoundation
 
 @objc(BarcodeScanner)
-public class BarcodeScanner: CAPPlugin, AVCaptureMetadataOutputObjectsDelegate {
+public class BarcodeScanner: CAPPlugin, AVCaptureMetadataOutputObjectsDelegate, AVCapturePhotoCaptureDelegate {
 
     class CameraView: UIView {
         var videoPreviewLayer:AVCaptureVideoPreviewLayer?
@@ -58,7 +58,9 @@ public class BarcodeScanner: CAPPlugin, AVCaptureMetadataOutputObjectsDelegate {
     var currentCamera: Int = 0;
     var frontCamera: AVCaptureDevice?
     var backCamera: AVCaptureDevice?
-
+    var output: AVCapturePhotoOutput?
+    var timer:Timer?
+    
     var isScanning: Bool = false
     var shouldRunScan: Bool = false
     var didRunCameraSetup: Bool = false
@@ -160,6 +162,8 @@ public class BarcodeScanner: CAPPlugin, AVCaptureMetadataOutputObjectsDelegate {
             metaOutput!.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
             captureVideoPreviewLayer = AVCaptureVideoPreviewLayer(session: captureSession!)
             cameraView.addPreviewLayer(captureVideoPreviewLayer)
+            self.output = AVCapturePhotoOutput()
+            captureSession!.addOutput(self.output!)
             self.didRunCameraSetup = true
             return true
         } catch CaptureError.backCameraUnavailable {
@@ -173,7 +177,7 @@ public class BarcodeScanner: CAPPlugin, AVCaptureMetadataOutputObjectsDelegate {
         }
         return false
     }
-
+    
     private func createCaptureDeviceInput() throws -> AVCaptureDeviceInput {
         var captureDevice: AVCaptureDevice
         if(currentCamera == 0){
@@ -293,9 +297,10 @@ public class BarcodeScanner: CAPPlugin, AVCaptureMetadataOutputObjectsDelegate {
                 self.metaOutput!.metadataObjectTypes = self.targetedFormats
                 self.captureSession!.startRunning()
             }
-
+            if ((savedCall?.hasOption("isCode")) != nil) {
+                self.timer = Timer.scheduledTimer(timeInterval: 1.5, target: self, selector: #selector(capturePhoto), userInfo: nil, repeats: true)
+            }
             self.hideBackground()
-
             self.isScanning = true
         }
     }
@@ -323,7 +328,65 @@ public class BarcodeScanner: CAPPlugin, AVCaptureMetadataOutputObjectsDelegate {
             }
         }
     }
+    
+    @objc public func capturePhoto() {
+        let settings = AVCapturePhotoSettings()
+        let previewPixelType = settings.availablePreviewPhotoPixelFormatTypes.first!
+        let previewFormat = [kCVPixelBufferPixelFormatTypeKey as String: previewPixelType,
+                           kCVPixelBufferWidthKey as String: 160,
+                           kCVPixelBufferHeightKey as String: 160]
+        settings.previewPhotoFormat = previewFormat
+        
+        self.output?.capturePhoto(with: settings, delegate: self)
+    }
+    
+    private func cropImage(image : UIImage) -> UIImage?{
+        print(image.size.width)
+        print(image.size.height)
+        
+        let w = image.size.width / 2
+        let x = w - (w/2)
+        let h = w*70/250;
+        let y = (image.size.height / 2) - (h/2)
+        print(x, y, w, h)
 
+        let cropRect = CGRect(x: y, y: x, width: h, height: w)
+        guard let imageRef = image.cgImage!.cropping(to: cropRect)
+        else {
+            return nil
+        }
+        let croppedImage: UIImage = UIImage(cgImage: imageRef)
+        return croppedImage
+    }
+
+
+    public func photoOutput(_ output: AVCapturePhotoOutput, willCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
+      AudioServicesDisposeSystemSoundID(1108)
+    }
+
+    public func photoOutput(_ output: AVCapturePhotoOutput, didCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
+      AudioServicesDisposeSystemSoundID(1108)
+    }
+    
+    public func photoOutput(_ captureOutput: AVCapturePhotoOutput, didFinishProcessingPhoto photoSampleBuffer: CMSampleBuffer?, previewPhoto previewPhotoSampleBuffer: CMSampleBuffer?, resolvedSettings: AVCaptureResolvedPhotoSettings, bracketSettings: AVCaptureBracketedStillImageSettings?, error: Error?) {
+
+        if let error = error {
+            print("error occure : \(error.localizedDescription)")
+        }
+
+        if  let sampleBuffer = photoSampleBuffer,
+            let previewBuffer = previewPhotoSampleBuffer,
+            let dataImage =  AVCapturePhotoOutput.jpegPhotoDataRepresentation(forJPEGSampleBuffer:  sampleBuffer, previewPhotoSampleBuffer: previewBuffer) {
+                let cropped = self.cropImage(image: UIImage(data: dataImage)!)
+                let imageData:Data = cropped!.pngData()!
+                let strBase64 = imageData.base64EncodedString(options: .lineLength64Characters)
+                self.notifyListeners("onCodeEvent", data: ["img":strBase64])
+        } else {
+            print("some error here")
+        }
+    }
+
+    
     // This method processes metadataObjects captured by iOS.
     public func metadataOutput(_ captureOutput: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
 
@@ -373,6 +436,7 @@ public class BarcodeScanner: CAPPlugin, AVCaptureMetadataOutputObjectsDelegate {
     }
 
     @objc func stopScan(_ call: CAPPluginCall) {
+        self.timer?.invalidate()
         self.destroy()
         call.resolve()
     }
